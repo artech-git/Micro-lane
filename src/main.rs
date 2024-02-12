@@ -15,7 +15,7 @@ mod question;
 
 
 fn main() -> BackendResult<()> {
-    let socket = UdpSocket::bind(("0.0.0.0", 2053))?;
+    let socket = UdpSocket::bind(("0.0.0.0", 53))?;
 
     loop {
         match handle_query(&socket) {
