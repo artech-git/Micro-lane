@@ -1,5 +1,4 @@
 use std::net::UdpSocket;
-use std::net::{Ipv4Addr, Ipv6Addr};
 
 use error::BackendResult;
 use packet::handle_query;
