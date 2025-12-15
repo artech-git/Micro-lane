@@ -26,21 +26,21 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-      - name: Add known_hosts
+      - name: Add server to known_hosts
         run: |
           mkdir -p ~/.ssh
           ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Deploy via rsync
+      - name: Deploy to server
         run: |
           rsync -avz \
             --delete \
             ./release/ \
-            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${{ secrets.DEPLOY_PATH }}
+            ubuntu@${{ secrets.SSH_HOST }}:/home/ubuntu/micro-lane/
 
       - name: Restart service
         run: |
-          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
+          ssh ubuntu@${{ secrets.SSH_HOST }} << 'EOF'
             systemctl restart myapp.service
             systemctl status myapp.service --no-pager
           EOF
