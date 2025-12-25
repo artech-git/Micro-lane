@@ -1,8 +1,6 @@
 use crate::error::BackendResult;
 
 
-
-
 pub struct BytePacketBuffer {
     pub buf: [u8; 512],
     pub pos: usize,
@@ -15,6 +13,17 @@ impl BytePacketBuffer {
             buf: [0; 512],
             pos: 0,
         }
+    }
+
+    pub fn from_vec(vec: Vec<u8>) -> BytePacketBuffer {
+        
+        //TODO: perform the transmute operation from Vec to [u8; 512] safely
+
+        let mut buffer = BytePacketBuffer::new();
+        for (i, byte) in vec.into_iter().enumerate() {
+            buffer.buf[i] = byte;
+        }
+        buffer
     }
 
     pub fn pos(&self) -> usize {
