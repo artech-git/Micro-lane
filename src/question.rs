@@ -1,7 +1,5 @@
 use crate::{bytes::BytePacketBuffer, error::BackendResult, query::QueryType};
 
-
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsQuestion {
     pub name: String,

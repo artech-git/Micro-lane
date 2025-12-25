@@ -14,12 +14,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download build artifact
-        uses: actions/download-artifact@v4
+      - name: Download artifact from workflow run
+        uses: dawidd6/action-download-artifact@v6
         with:
+          workflow: main.yml
           name: rust-build
-          path: ./release
-          run-id: ${{ github.event.workflow_run.id }}
+          path: ./release/
+          run_id: ${{ github.event.workflow_run.id }}
+
+      - name: Check downloaded files
+        run: |
+          echo "=== Downloaded files ==="
+          ls -lah ./release/
+          echo "=== Making binary executable ==="
+          chmod +x ./release/*
 
       - name: Start SSH agent
         uses: webfactory/ssh-agent@v0.9.0
@@ -41,6 +49,7 @@ jobs:
       - name: Restart service
         run: |
           ssh ubuntu@${{ secrets.SSH_HOST }} << 'EOF'
+            chmod +x /home/ubuntu/micro-lane/*
             systemctl restart myapp.service
             systemctl status myapp.service --no-pager
           EOF

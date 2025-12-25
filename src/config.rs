@@ -1,4 +1,3 @@
-
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
@@ -31,7 +30,6 @@ pub struct Config {
 }
 
 fn check_log_path(path: &str) -> Result<PathBuf, String> {
-    
     let path = Path::new(path);
 
     if !path.exists() {

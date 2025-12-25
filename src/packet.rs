@@ -1,8 +1,14 @@
-use std::{net::{Ipv4Addr, SocketAddr, UdpSocket}, sync::Arc};
-use tokio::{net::UdpSocket as TokioUdpSocket, sync::Notify};
+use crate::{
+    bytes::BytePacketBuffer,
+    error::BackendResult,
+    header::{DnsHeader, ResultCode},
+    query::QueryType,
+    question::DnsQuestion,
+    record::DnsRecord,
+};
+use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use tokio::net::UdpSocket as TokioUdpSocket;
 use tracing::trace_span as trace;
-use crate::{bytes::BytePacketBuffer, error::BackendResult, header::{DnsHeader, ResultCode}, query::QueryType, question::DnsQuestion, record::DnsRecord};
-
 
 #[derive(Clone, Debug)]
 pub struct DnsPacket {
@@ -141,11 +147,16 @@ impl DnsPacket {
 }
 
 fn lookup(qname: &str, qtype: QueryType, server: (Ipv4Addr, u16)) -> BackendResult<DnsPacket> {
-
     // allow the port to bind to any ephemeral port
     let socket = UdpSocket::bind(("0.0.0.0", 0))?;
 
-    trace!("connection_debug", "Performing lookup for {:?} {} with server {}", qtype, qname, server.0);
+    trace!(
+        "connection_debug",
+        "Performing lookup for {:?} {} with server {}",
+        qtype,
+        qname,
+        server.0
+    );
 
     let mut packet = DnsPacket::new();
 
@@ -171,7 +182,13 @@ fn recursive_lookup(qname: &str, qtype: QueryType) -> BackendResult<DnsPacket> {
 
     // Since it might take an arbitrary number of steps, we enter an unbounded loop.
     loop {
-        tracing::info_span!("connection_debug", "attempting lookup of {:?} {} with ns {}", qtype, qname, ns);
+        tracing::info_span!(
+            "connection_debug",
+            "attempting lookup of {:?} {} with ns {}",
+            qtype,
+            qname,
+            ns
+        );
 
         // The next step is to send the query to the active server.
         let ns_copy = ns;
@@ -221,9 +238,12 @@ fn recursive_lookup(qname: &str, qtype: QueryType) -> BackendResult<DnsPacket> {
     }
 }
 
-
-// point of contact for handling the query packets initally 
-pub async fn handle_query(socket: &TokioUdpSocket, addr: SocketAddr, data: Vec<u8>) -> BackendResult<()> {
+// point of contact for handling the query packets initally
+pub async fn handle_query(
+    socket: &TokioUdpSocket,
+    addr: SocketAddr,
+    data: Vec<u8>,
+) -> BackendResult<()> {
     let mut req_buffer = BytePacketBuffer::from_vec(data);
     let mut request = DnsPacket::from_buffer(&mut req_buffer)?;
 
