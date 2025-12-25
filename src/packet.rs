@@ -1,5 +1,6 @@
-use std::net::{Ipv4Addr, UdpSocket};
-
+use std::{net::{Ipv4Addr, SocketAddr, UdpSocket}, sync::Arc};
+use tokio::{net::UdpSocket as TokioUdpSocket, sync::Notify};
+use tracing::trace_span as trace;
 use crate::{bytes::BytePacketBuffer, error::BackendResult, header::{DnsHeader, ResultCode}, query::QueryType, question::DnsQuestion, record::DnsRecord};
 
 
@@ -140,7 +141,11 @@ impl DnsPacket {
 }
 
 fn lookup(qname: &str, qtype: QueryType, server: (Ipv4Addr, u16)) -> BackendResult<DnsPacket> {
-    let socket = UdpSocket::bind(("0.0.0.0", 42210))?;
+
+    // allow the port to bind to any ephemeral port
+    let socket = UdpSocket::bind(("0.0.0.0", 0))?;
+
+    trace!("connection_debug", "Performing lookup for {:?} {} with server {}", qtype, qname, server.0);
 
     let mut packet = DnsPacket::new();
 
@@ -166,7 +171,7 @@ fn recursive_lookup(qname: &str, qtype: QueryType) -> BackendResult<DnsPacket> {
 
     // Since it might take an arbitrary number of steps, we enter an unbounded loop.
     loop {
-        println!("attempting lookup of {:?} {} with ns {}", qtype, qname, ns);
+        tracing::info_span!("connection_debug", "attempting lookup of {:?} {} with ns {}", qtype, qname, ns);
 
         // The next step is to send the query to the active server.
         let ns_copy = ns;
@@ -216,35 +221,39 @@ fn recursive_lookup(qname: &str, qtype: QueryType) -> BackendResult<DnsPacket> {
     }
 }
 
-pub fn handle_query(socket: &UdpSocket) -> BackendResult<()> {
-    let mut req_buffer = BytePacketBuffer::new();
-    let (_, src) = socket.recv_from(&mut req_buffer.buf)?;
 
+// point of contact for handling the query packets initally 
+pub async fn handle_query(socket: &TokioUdpSocket, addr: SocketAddr, data: Vec<u8>) -> BackendResult<()> {
+    let mut req_buffer = BytePacketBuffer::from_vec(data);
     let mut request = DnsPacket::from_buffer(&mut req_buffer)?;
 
     let mut packet = DnsPacket::new();
+
     packet.header.id = request.header.id;
     packet.header.recursion_desired = true;
     packet.header.recursion_available = true;
     packet.header.response = true;
 
+    let _span = tracing::span!(tracing::Level::TRACE, "connection_debug");
+    let _ = _span.enter();
+
     if let Some(question) = request.questions.pop() {
-        println!("Received query: {:?}", question);
+        tracing::debug!("Received query: {:?}", question);
 
         if let Ok(result) = recursive_lookup(&question.name, question.qtype) {
             packet.questions.push(question.clone());
             packet.header.rescode = result.header.rescode;
 
             for rec in result.answers {
-                println!("Answer: {:?}", rec);
+                tracing::info!("Answer: {:?}", rec);
                 packet.answers.push(rec);
             }
             for rec in result.authorities {
-                println!("Authority: {:?}", rec);
+                tracing::info!("Authority: {:?}", rec);
                 packet.authorities.push(rec);
             }
             for rec in result.resources {
-                println!("Resource: {:?}", rec);
+                tracing::info!("Resource: {:?}", rec);
                 packet.resources.push(rec);
             }
         } else {
@@ -255,12 +264,14 @@ pub fn handle_query(socket: &UdpSocket) -> BackendResult<()> {
     }
 
     let mut res_buffer = BytePacketBuffer::new();
-    packet.write(&mut res_buffer)?;
+    packet.write(&mut res_buffer)?; // put the packet data into the response buffer
+
+    tracing::debug!("Sending response: {:?}", packet);
 
     let len = res_buffer.pos();
     let data = res_buffer.get_range(0, len)?;
 
-    socket.send_to(data, src)?;
+    socket.send_to(data, addr).await?;
 
     Ok(())
 }
