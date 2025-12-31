@@ -27,10 +27,10 @@ This repository houses a pure-Rust implementation of a high-performance, flexibl
    This will start the server on the default port (53).
 
 ## **Live Deployment:**
-You can query this dns server live on following IP: 152.70.61.218 deployed over port: 153, query for dns name
+You can query this dns server live on following IP: 152.70.61.218 deployed over port: 8153, query for dns name
 
 ```bash
-   % dig github.com @152.70.61.218 -p 153
+   % dig github.com @152.70.61.218 -p 8153
 ```
 
 ## **Configuration:**

@@ -44,12 +44,12 @@ jobs:
           rsync -avz \
             --delete \
             ./release/ \
-            ubuntu@${{ secrets.SSH_HOST }}:/home/ubuntu/micro-lane/
+            ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/home/${{ secrets.SSH_USER }}/micro-lane/
 
       - name: Restart service
         run: |
-          ssh ubuntu@${{ secrets.SSH_HOST }} << 'EOF'
-            chmod +x /home/ubuntu/micro-lane/*
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
+            chmod +x /home/${{ secrets.SSH_USER }}/micro-lane/*
             systemctl restart myapp.service
             systemctl status myapp.service --no-pager
           EOF
