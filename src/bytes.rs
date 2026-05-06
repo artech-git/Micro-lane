@@ -1,11 +1,9 @@
 use crate::error::BackendResult;
 
-
 pub struct BytePacketBuffer {
     pub buf: [u8; 512],
     pub pos: usize,
 }
-
 
 impl BytePacketBuffer {
     pub fn new() -> BytePacketBuffer {
@@ -16,7 +14,6 @@ impl BytePacketBuffer {
     }
 
     pub fn from_vec(vec: Vec<u8>) -> BytePacketBuffer {
-        
         //TODO: perform the transmute operation from Vec to [u8; 512] safely
 
         let mut buffer = BytePacketBuffer::new();
@@ -63,7 +60,7 @@ impl BytePacketBuffer {
         if start + len >= 512 {
             return Err("End of buffer".into());
         }
-        Ok(&self.buf[start..start + len as usize])
+        Ok(&self.buf[start..start + len])
     }
 
     pub fn read_u16(&mut self) -> BackendResult<u16> {
@@ -76,7 +73,7 @@ impl BytePacketBuffer {
         let res = ((self.read()? as u32) << 24)
             | ((self.read()? as u32) << 16)
             | ((self.read()? as u32) << 8)
-            | ((self.read()? as u32) << 0);
+            | (self.read()? as u32);
 
         Ok(res)
     }
@@ -167,7 +164,7 @@ impl BytePacketBuffer {
         self.write(((val >> 24) & 0xFF) as u8)?;
         self.write(((val >> 16) & 0xFF) as u8)?;
         self.write(((val >> 8) & 0xFF) as u8)?;
-        self.write(((val >> 0) & 0xFF) as u8)?;
+        self.write((val & 0xFF) as u8)?;
 
         Ok(())
     }

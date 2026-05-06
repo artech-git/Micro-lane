@@ -1,8 +1,17 @@
-use std::{net::{Ipv4Addr, SocketAddr, UdpSocket}, sync::Arc};
-use tokio::{net::UdpSocket as TokioUdpSocket, sync::Notify};
-use tracing::trace_span as trace;
-use crate::{bytes::BytePacketBuffer, error::BackendResult, header::{DnsHeader, ResultCode}, query::QueryType, question::DnsQuestion, record::DnsRecord};
-
+use crate::{
+    bytes::BytePacketBuffer,
+    error::BackendResult,
+    header::{DnsHeader, ResultCode},
+    query::QueryType,
+    question::DnsQuestion,
+    record::DnsRecord,
+    upstream_resolver::UpstreamNameServer,
+};
+use std::future::Future;
+use std::net::{Ipv4Addr, SocketAddr};
+use std::pin::Pin;
+use std::sync::Arc;
+use tokio::net::UdpSocket as TokioUdpSocket;
 
 #[derive(Clone, Debug)]
 pub struct DnsPacket {
@@ -140,90 +149,79 @@ impl DnsPacket {
     }
 }
 
-fn lookup(qname: &str, qtype: QueryType, server: (Ipv4Addr, u16)) -> BackendResult<DnsPacket> {
+// Async recursion requires boxing — Rust cannot compute the size of a directly recursive
+// async fn's future at compile time.
+fn recursive_lookup<'a>(
+    qname: &'a str,
+    qtype: QueryType,
+    resolver: &'a UpstreamNameServer,
+) -> Pin<Box<dyn Future<Output = BackendResult<DnsPacket>> + Send + 'a>> {
+    Box::pin(async move {
+        // For now we're always starting with *a.root-servers.net*.
+        let mut ns = "8.8.4.4".parse::<Ipv4Addr>().unwrap();
 
-    // allow the port to bind to any ephemeral port
-    let socket = UdpSocket::bind(("0.0.0.0", 0))?;
+        // Since it might take an arbitrary number of steps, we enter an unbounded loop.
+        loop {
+            tracing::info_span!(
+                "connection_debug",
+                "attempting lookup of {:?} {} with ns {}",
+                qtype,
+                qname,
+                ns
+            );
 
-    trace!("connection_debug", "Performing lookup for {:?} {} with server {}", qtype, qname, server.0);
+            let server = (ns, 53);
+            let response = resolver.lookup(qname, qtype, server).await?;
 
-    let mut packet = DnsPacket::new();
+            // If there are entries in the answer section, and no errors, we are done!
+            if !response.answers.is_empty() && response.header.rescode == ResultCode::NOERROR {
+                return Ok(response);
+            }
 
-    packet.header.id = 6666;
-    packet.header.questions = 1;
-    packet.header.recursion_desired = true;
-    packet
-        .questions
-        .push(DnsQuestion::new(qname.to_string(), qtype));
+            // We might also get a `NXDOMAIN` reply, which is the authoritative name servers
+            // way of telling us that the name doesn't exist.
+            if response.header.rescode == ResultCode::NXDOMAIN {
+                return Ok(response);
+            }
 
-    let mut req_buffer = BytePacketBuffer::new();
-    packet.write(&mut req_buffer)?;
-    socket.send_to(&req_buffer.buf[0..req_buffer.pos], server)?;
+            // Otherwise, we'll try to find a new nameserver based on NS and a corresponding A
+            // record in the additional section. If this succeeds, we can switch name server
+            // and retry the loop.
+            if let Some(new_ns) = response.get_resolved_ns(qname) {
+                ns = new_ns;
+                continue;
+            }
 
-    let mut res_buffer = BytePacketBuffer::new();
-    socket.recv_from(&mut res_buffer.buf)?;
-    DnsPacket::from_buffer(&mut res_buffer)
+            // If not, we'll have to resolve the ip of a NS record. If no NS records exist,
+            // we'll go with what the last server told us.
+            let new_ns_name = match response.get_unresolved_ns(qname) {
+                Some(x) => x.to_owned(),
+                None => return Ok(response),
+            };
+
+            // Here we go down the rabbit hole by starting _another_ lookup sequence in the
+            // midst of our current one. Hopefully, this will give us the IP of an appropriate
+            // name server.
+            let recursive_response = recursive_lookup(&new_ns_name, QueryType::A, resolver).await?;
+
+            // Finally, we pick a random ip from the result, and restart the loop. If no such
+            // record is available, we again return the last result we got.
+            if let Some(new_ns) = recursive_response.get_random_a() {
+                ns = new_ns;
+            } else {
+                return Ok(response);
+            }
+        }
+    })
 }
 
-fn recursive_lookup(qname: &str, qtype: QueryType) -> BackendResult<DnsPacket> {
-    // For now we're always starting with *a.root-servers.net*.
-    let mut ns = "8.8.4.4".parse::<Ipv4Addr>().unwrap();
-
-    // Since it might take an arbitrary number of steps, we enter an unbounded loop.
-    loop {
-        tracing::info_span!("connection_debug", "attempting lookup of {:?} {} with ns {}", qtype, qname, ns);
-
-        // The next step is to send the query to the active server.
-        let ns_copy = ns;
-
-        let server = (ns_copy, 53);
-        let response = lookup(qname, qtype, server)?;
-
-        // If there are entries in the answer section, and no errors, we are done!
-        if !response.answers.is_empty() && response.header.rescode == ResultCode::NOERROR {
-            return Ok(response);
-        }
-
-        // We might also get a `NXDOMAIN` reply, which is the authoritative name servers
-        // way of telling us that the name doesn't exist.
-        if response.header.rescode == ResultCode::NXDOMAIN {
-            return Ok(response);
-        }
-
-        // Otherwise, we'll try to find a new nameserver based on NS and a corresponding A
-        // record in the additional section. If this succeeds, we can switch name server
-        // and retry the loop.
-        if let Some(new_ns) = response.get_resolved_ns(qname) {
-            ns = new_ns;
-
-            continue;
-        }
-
-        // If not, we'll have to resolve the ip of a NS record. If no NS records exist,
-        // we'll go with what the last server told us.
-        let new_ns_name = match response.get_unresolved_ns(qname) {
-            Some(x) => x,
-            None => return Ok(response),
-        };
-
-        // Here we go down the rabbit hole by starting _another_ lookup sequence in the
-        // midst of our current one. Hopefully, this will give us the IP of an appropriate
-        // name server.
-        let recursive_response = recursive_lookup(&new_ns_name, QueryType::A)?;
-
-        // Finally, we pick a random ip from the result, and restart the loop. If no such
-        // record is available, we again return the last result we got.
-        if let Some(new_ns) = recursive_response.get_random_a() {
-            ns = new_ns;
-        } else {
-            return Ok(response);
-        }
-    }
-}
-
-
-// point of contact for handling the query packets initally 
-pub async fn handle_query(socket: &TokioUdpSocket, addr: SocketAddr, data: Vec<u8>) -> BackendResult<()> {
+// point of contact for handling the query packets initally
+pub async fn handle_query(
+    socket: &TokioUdpSocket,
+    addr: SocketAddr,
+    data: Vec<u8>,
+    resolver: Arc<UpstreamNameServer>,
+) -> BackendResult<()> {
     let mut req_buffer = BytePacketBuffer::from_vec(data);
     let mut request = DnsPacket::from_buffer(&mut req_buffer)?;
 
@@ -240,7 +238,7 @@ pub async fn handle_query(socket: &TokioUdpSocket, addr: SocketAddr, data: Vec<u
     if let Some(question) = request.questions.pop() {
         tracing::debug!("Received query: {:?}", question);
 
-        if let Ok(result) = recursive_lookup(&question.name, question.qtype) {
+        if let Ok(result) = recursive_lookup(&question.name, question.qtype, &resolver).await {
             packet.questions.push(question.clone());
             packet.header.rescode = result.header.rescode;
 

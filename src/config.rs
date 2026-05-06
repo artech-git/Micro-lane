@@ -1,4 +1,3 @@
-
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
@@ -28,10 +27,13 @@ pub struct Config {
     /// file logging location
     #[clap(short, long, default_value =  "./", value_parser = check_log_path)]
     pub log_path: PathBuf,
+
+    /// Timeout in seconds for upstream DNS lookups
+    #[clap(long, default_value = "5")]
+    pub upstream_timeout_secs: u64,
 }
 
 fn check_log_path(path: &str) -> Result<PathBuf, String> {
-    
     let path = Path::new(path);
 
     if !path.exists() {

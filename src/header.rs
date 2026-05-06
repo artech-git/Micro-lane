@@ -1,7 +1,5 @@
 use crate::{bytes::BytePacketBuffer, error::BackendResult};
 
-
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ResultCode {
     NOERROR = 0,
@@ -24,7 +22,6 @@ impl ResultCode {
         }
     }
 }
-
 
 #[derive(Clone, Debug)]
 pub struct DnsHeader {
@@ -126,4 +123,3 @@ impl DnsHeader {
         Ok(())
     }
 }
-
