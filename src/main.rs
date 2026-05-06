@@ -31,7 +31,6 @@ use crate::util::shutdown_signal;
         DONE:
         1. collecting the config from command line
         4. logging using tracing crate
-
 */
 
 #[tokio::main]
@@ -65,15 +64,14 @@ async fn main() -> BackendResult<()> {
 
     // Single circuit-breaker-backed resolver shared across all query tasks.
     let resolver = Arc::new(UpstreamNameServer::init(
-        &[
-            std::net::SocketAddr::from(([8, 8, 8, 8], 53)),
-            std::net::SocketAddr::from(([8, 8, 4, 4], 53)),
-        ],
+        &config_data.upstream_servers,
         Duration::from_secs(config_data.upstream_timeout_secs),
+        config_data.recursive_ns_seed,
+        config_data.upstream_dns_port,
     ));
 
     // buffer for receiving data, and transferring to the handler
-    let mut temp_buffer = [0u8; 2048];
+    let mut temp_buffer = vec![0u8; config_data.recv_buffer_size];
 
     // tokio task handler for tracking the tasks spawned for given connections
     let task_handler = tokio_util::task::TaskTracker::new();

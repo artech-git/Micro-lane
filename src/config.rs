@@ -1,3 +1,4 @@
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
@@ -14,6 +15,22 @@ pub struct Config {
     /// Default is 53
     #[clap(short, long)]
     pub port: u16,
+
+    /// Upstream DNS servers for forwarding queries (format: IP:PORT)
+    #[clap(long, num_args = 1.., default_values = ["8.8.8.8:53", "8.8.4.4:53"])]
+    pub upstream_servers: Vec<SocketAddr>,
+
+    /// Starting nameserver IP for recursive DNS resolution
+    #[clap(long, default_value = "8.8.4.4")]
+    pub recursive_ns_seed: Ipv4Addr,
+
+    /// Port used when querying nameservers during recursive resolution
+    #[clap(long, default_value = "53")]
+    pub upstream_dns_port: u16,
+
+    /// UDP receive buffer size in bytes
+    #[clap(long, default_value = "2048")]
+    pub recv_buffer_size: usize,
 
     /// Enable stdout logging
     #[clap(short, long, default_value = "true")]
@@ -38,10 +55,6 @@ fn check_log_path(path: &str) -> Result<PathBuf, String> {
 
     if !path.exists() {
         std::fs::create_dir_all(path).map_err(|err| {
-            // clap::Error::raw(
-            //     clap::error::ErrorKind::InvalidValue,
-            //     format!("Failed to create log directory: {}", err),
-            // )
             err.to_string()
         })?;
     }

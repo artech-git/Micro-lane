@@ -157,8 +157,7 @@ fn recursive_lookup<'a>(
     resolver: &'a UpstreamNameServer,
 ) -> Pin<Box<dyn Future<Output = BackendResult<DnsPacket>> + Send + 'a>> {
     Box::pin(async move {
-        // For now we're always starting with *a.root-servers.net*.
-        let mut ns = "8.8.4.4".parse::<Ipv4Addr>().unwrap();
+        let mut ns = resolver.recursive_ns_seed;
 
         // Since it might take an arbitrary number of steps, we enter an unbounded loop.
         loop {
@@ -170,7 +169,7 @@ fn recursive_lookup<'a>(
                 ns
             );
 
-            let server = (ns, 53);
+            let server = (ns, resolver.upstream_dns_port);
             let response = resolver.lookup(qname, qtype, server).await?;
 
             // If there are entries in the answer section, and no errors, we are done!

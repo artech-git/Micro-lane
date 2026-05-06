@@ -18,8 +18,6 @@ pub mod log_target_data {
     ];
 }
 
-const UPSTREAM_SERVER: [&str; 2] = ["8.8.8.8", "8.8.4.4"];
-
 // only shutdown on SIGTERM or SIGINT
 pub async fn shutdown_signal() -> Result<Arc<Notify>, Box<dyn std::error::Error>> {
     let notifier = Arc::new(Notify::new());

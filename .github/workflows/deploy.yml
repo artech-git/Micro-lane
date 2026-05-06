@@ -6,6 +6,10 @@ on:
     types:
       - completed
 
+env:
+  SERVICE_NAME: micro-lane.service
+  RELEASE_DIR: ./release/
+
 jobs:
   deploy:
     if: >
@@ -19,15 +23,15 @@ jobs:
         with:
           workflow: main.yml
           name: rust-build
-          path: ./release/
+          path: ${{ env.RELEASE_DIR }}
           run_id: ${{ github.event.workflow_run.id }}
 
       - name: Check downloaded files
         run: |
           echo "=== Downloaded files ==="
-          ls -lah ./release/
+          ls -lah ${{ env.RELEASE_DIR }}
           echo "=== Making binary executable ==="
-          chmod +x ./release/*
+          chmod +x ${{ env.RELEASE_DIR }}*
 
       - name: Start SSH agent
         uses: webfactory/ssh-agent@v0.9.0
@@ -43,13 +47,13 @@ jobs:
         run: |
           rsync -avz \
             --delete \
-            ./release/ \
+            ${{ env.RELEASE_DIR }} \
             ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/home/${{ secrets.SSH_USER }}/micro-lane/
 
       - name: Restart service
         run: |
           ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} << 'EOF'
             chmod +x /home/${{ secrets.SSH_USER }}/micro-lane/*
-            systemctl restart myapp.service
-            systemctl status myapp.service --no-pager
+            systemctl restart ${{ env.SERVICE_NAME }}
+            systemctl status ${{ env.SERVICE_NAME }} --no-pager
           EOF
