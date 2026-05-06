@@ -125,7 +125,9 @@ async fn main() -> BackendResult<()> {
         }
     }
 
-    // finish the existing tokio task handles
+    // close() signals the tracker that no new tasks will be spawned, which is
+    // required for wait() to ever resolve — without it wait() blocks forever.
+    task_handler.close();
     task_handler.wait().await;
 
     Ok(())
