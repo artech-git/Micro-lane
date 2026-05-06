@@ -16,6 +16,7 @@ mod query;
 mod question;
 mod record;
 mod util;
+mod upstream_resolver;
 
 use tracing::debug_span as debug;
 use tracing::error_span as err;
@@ -27,18 +28,13 @@ use crate::util::shutdown_signal;
 
         2. handling signal_c for graceful shutdown
 
-
         3. upstream stream lookup from another dns server
             (FIXED) 3.1 random port binding for upstream queries
-            3.2 Solution NO.2 -> using single socket for handling the upstream queries in Rows
 
         DONE:
         1. collecting the config from command line
         4. logging using tracing crate
 
-
-        TODO:
-        // use single upstream port for upstream queries and not ephemeral ports
 */
 
 #[tokio::main]
