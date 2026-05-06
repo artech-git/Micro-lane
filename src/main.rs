@@ -1,6 +1,7 @@
 use clap::Parser;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
+use upstream_resolver::UpstreamNameServer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -66,6 +67,12 @@ async fn main() -> BackendResult<()> {
     let inner_socket = UdpSocket::bind((config_data.bind_ip, config_data.port)).await?;
     let shared_socket = Arc::new(inner_socket);
 
+    // Single circuit-breaker-backed resolver shared across all query tasks.
+    let resolver = Arc::new(UpstreamNameServer::init(&[
+        std::net::SocketAddr::from(([8, 8, 8, 8], 53)),
+        std::net::SocketAddr::from(([8, 8, 4, 4], 53)),
+    ]));
+
     // buffer for receiving data, and transferring to the handler
     let mut temp_buffer = [0u8; 2048];
 
@@ -96,10 +103,11 @@ async fn main() -> BackendResult<()> {
 
                 let data = temp_buffer[..len].to_vec();
                 let shared_socket_internal = shared_socket.clone();
+                let resolver_clone = Arc::clone(&resolver);
 
                 task_handler.spawn(async move {
 
-                    match handle_query(&shared_socket_internal, addr, data).await {
+                    match handle_query(&shared_socket_internal, addr, data, resolver_clone).await {
                         Ok(_) => {
                             debug!("connection_debug", "Query handled successfully for {addr}");
                         }
