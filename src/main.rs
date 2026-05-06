@@ -1,5 +1,6 @@
 use clap::Parser;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::UdpSocket;
 use upstream_resolver::UpstreamNameServer;
 use tracing_subscriber::layer::SubscriberExt;
@@ -68,10 +69,13 @@ async fn main() -> BackendResult<()> {
     let shared_socket = Arc::new(inner_socket);
 
     // Single circuit-breaker-backed resolver shared across all query tasks.
-    let resolver = Arc::new(UpstreamNameServer::init(&[
-        std::net::SocketAddr::from(([8, 8, 8, 8], 53)),
-        std::net::SocketAddr::from(([8, 8, 4, 4], 53)),
-    ]));
+    let resolver = Arc::new(UpstreamNameServer::init(
+        &[
+            std::net::SocketAddr::from(([8, 8, 8, 8], 53)),
+            std::net::SocketAddr::from(([8, 8, 4, 4], 53)),
+        ],
+        Duration::from_secs(config_data.upstream_timeout_secs),
+    ));
 
     // buffer for receiving data, and transferring to the handler
     let mut temp_buffer = [0u8; 2048];

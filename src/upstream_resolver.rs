@@ -6,8 +6,6 @@ use failsafe::futures::CircuitBreaker as _;
 use tokio::net::UdpSocket;
 use tracing::trace;
 
-const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(5);
-
 use crate::{
     bytes::BytePacketBuffer,
     error::BackendResult,
@@ -28,24 +26,26 @@ type DnsCircuitBreaker = failsafe::StateMachine<
 
 pub struct UpstreamNameServer {
     pub resolvers: Vec<std::net::SocketAddr>,
+    timeout: Duration,
     // Shared across clones so all query tasks see the same breaker state.
     circuit_breaker: Arc<DnsCircuitBreaker>,
 }
 
 impl UpstreamNameServer {
-    pub fn new(resolvers: Vec<std::net::SocketAddr>) -> Self {
+    pub fn new(resolvers: Vec<std::net::SocketAddr>, timeout: Duration) -> Self {
         UpstreamNameServer {
             resolvers,
+            timeout,
             circuit_breaker: Arc::new(failsafe::Config::new().build()),
         }
     }
 
-    pub fn init(lookup_servers: impl AsRef<[std::net::SocketAddr]>) -> Self {
+    pub fn init(lookup_servers: impl AsRef<[std::net::SocketAddr]>, timeout: Duration) -> Self {
         let servers = lookup_servers.as_ref();
         if servers.is_empty() {
-            Self::new(vec![std::net::SocketAddr::from(([8, 8, 8, 8], 53))])
+            Self::new(vec![std::net::SocketAddr::from(([8, 8, 8, 8], 53))], timeout)
         } else {
-            Self::new(servers.to_vec())
+            Self::new(servers.to_vec(), timeout)
         }
     }
 
@@ -66,20 +66,21 @@ impl UpstreamNameServer {
         // Wrap raw_lookup in a timeout so a silent/slow upstream doesn't stall the task
         // indefinitely. The timeout resolves to Err, which the circuit breaker counts as a
         // failure — repeated timeouts will open the breaker.
+        let timeout = self.timeout;
         let timed = async move {
-            match tokio::time::timeout(UPSTREAM_TIMEOUT, raw_lookup(qname, qtype, server)).await {
+            match tokio::time::timeout(timeout, raw_lookup(qname, qtype, server)).await {
                 Ok(result) => result,
                 Err(_elapsed) => {
                     tracing::warn!(
                         target: "connection_err",
                         "Upstream lookup timed out after {}s: {} via {}",
-                        UPSTREAM_TIMEOUT.as_secs(),
+                        timeout.as_secs(),
                         qname,
                         server.0
                     );
                     Err(format!(
                         "upstream lookup timed out after {}s",
-                        UPSTREAM_TIMEOUT.as_secs()
+                        timeout.as_secs()
                     ).into())
                 }
             }
