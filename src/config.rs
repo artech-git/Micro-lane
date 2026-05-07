@@ -33,12 +33,12 @@ pub struct Config {
     pub recv_buffer_size: usize,
 
     /// Enable stdout logging
-    #[clap(short, long, default_value = "true")]
+    #[clap(short, long, default_value = "true", action = clap::ArgAction::Set)]
     pub stdout_logging: bool,
 
     /// Enable file logging
     /// Creates separate log files for each log target
-    #[clap(short, long, default_value = "false")]
+    #[clap(short, long, default_value = "false", action = clap::ArgAction::Set)]
     pub file_logging: bool,
 
     /// file logging location

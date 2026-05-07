@@ -25,14 +25,6 @@ use tracing::error_span as err;
 
 use crate::util::shutdown_signal;
 
-/*
-    Problems to solve:
-    
-        DONE:
-        1. collecting the config from command line
-        4. logging using tracing crate
-*/
-
 #[tokio::main]
 async fn main() -> BackendResult<()> {
     let config_data = match config::Config::try_parse() {
@@ -48,12 +40,14 @@ async fn main() -> BackendResult<()> {
         }
     };
 
-    let layers = util::setup_log_target_layer(config_data.log_path);
-    // Initialize the subscriber with the layers
-    let stdout_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stdout);
+    let file_layers = config_data.file_logging
+        .then(|| util::setup_log_target_layer(config_data.log_path));
+
+    let stdout_layer = config_data.stdout_logging
+        .then(|| tracing_subscriber::fmt::layer().with_writer(std::io::stdout));
 
     tracing_subscriber::registry()
-        .with(layers)
+        .with(file_layers)
         .with(stdout_layer)
         .init();
 
