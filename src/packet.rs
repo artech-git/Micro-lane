@@ -7,9 +7,7 @@ use crate::{
     record::DnsRecord,
     upstream_resolver::UpstreamNameServer,
 };
-use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::pin::Pin;
 use std::sync::Arc;
 use tokio::net::UdpSocket as TokioUdpSocket;
 
@@ -149,69 +147,123 @@ impl DnsPacket {
     }
 }
 
-// Async recursion requires boxing — Rust cannot compute the size of a directly recursive
-// async fn's future at compile time.
-fn recursive_lookup<'a>(
-    qname: &'a str,
+enum FrameState {
+    Active(Ipv4Addr),
+    // Suspended while a sub-frame resolves an NS hostname; holds the fallback response
+    // to return if the sub-frame yields no usable A record.
+    Suspended(DnsPacket),
+}
+
+struct Frame {
+    qname: String,
     qtype: QueryType,
-    resolver: &'a UpstreamNameServer,
-) -> Pin<Box<dyn Future<Output = BackendResult<DnsPacket>> + Send + 'a>> {
-    Box::pin(async move {
-        let mut ns = resolver.recursive_ns_seed;
+    state: FrameState,
+}
 
-        // Since it might take an arbitrary number of steps, we enter an unbounded loop.
-        loop {
-            tracing::info_span!(
-                "connection_debug",
-                "attempting lookup of {:?} {} with ns {}",
-                qtype,
-                qname,
-                ns
-            );
+async fn recursive_lookup(
+    qname: &str,
+    qtype: QueryType,
+    resolver: &UpstreamNameServer,
+) -> BackendResult<DnsPacket> {
+    let mut stack = vec![Frame {
+        qname: qname.to_owned(),
+        qtype,
+        state: FrameState::Active(resolver.recursive_ns_seed),
+    }];
 
-            let server = (ns, resolver.upstream_dns_port);
-            let response = resolver.lookup(qname, qtype, server).await?;
+    loop {
+        let frame = stack.last_mut().expect("stack is never empty here");
+        let ns = match &frame.state {
+            FrameState::Active(ip) => *ip,
+            FrameState::Suspended(_) => unreachable!("suspended frame must not be on top"),
+        };
 
-            // If there are entries in the answer section, and no errors, we are done!
-            if !response.answers.is_empty() && response.header.rescode == ResultCode::NOERROR {
-                return Ok(response);
+        tracing::info_span!(
+            "connection_debug",
+            "attempting lookup of {:?} {} with ns {}",
+            frame.qtype,
+            frame.qname,
+            ns
+        );
+
+        let response = resolver
+            .lookup(&frame.qname, frame.qtype, (ns, resolver.upstream_dns_port))
+            .await?;
+
+        let is_terminal = (!response.answers.is_empty()
+            && response.header.rescode == ResultCode::NOERROR)
+            || response.header.rescode == ResultCode::NXDOMAIN;
+
+        if is_terminal {
+            // Pop this frame and cascade the result back through suspended frames.
+            stack.pop();
+            let mut result = response;
+            while let Some(parent) = stack.last_mut() {
+                match &parent.state {
+                    FrameState::Suspended(_) => {
+                        if let Some(ip) = result.get_random_a() {
+                            parent.state = FrameState::Active(ip);
+                            break;
+                        }
+                        // Sub-resolution gave no A record — parent returns its fallback.
+                        let FrameState::Suspended(fallback) =
+                            std::mem::replace(&mut parent.state, FrameState::Active(resolver.recursive_ns_seed))
+                        else {
+                            unreachable!()
+                        };
+                        result = fallback;
+                        stack.pop();
+                    }
+                    FrameState::Active(_) => unreachable!("active frame below suspended"),
+                }
             }
-
-            // We might also get a `NXDOMAIN` reply, which is the authoritative name servers
-            // way of telling us that the name doesn't exist.
-            if response.header.rescode == ResultCode::NXDOMAIN {
-                return Ok(response);
+            if stack.is_empty() {
+                return Ok(result);
             }
+            continue;
+        }
 
-            // Otherwise, we'll try to find a new nameserver based on NS and a corresponding A
-            // record in the additional section. If this succeeds, we can switch name server
-            // and retry the loop.
-            if let Some(new_ns) = response.get_resolved_ns(qname) {
-                ns = new_ns;
-                continue;
-            }
+        if let Some(new_ns) = response.get_resolved_ns(&frame.qname) {
+            frame.state = FrameState::Active(new_ns);
+            continue;
+        }
 
-            // If not, we'll have to resolve the ip of a NS record. If no NS records exist,
-            // we'll go with what the last server told us.
-            let new_ns_name = match response.get_unresolved_ns(qname) {
-                Some(x) => x.to_owned(),
-                None => return Ok(response),
-            };
+        if let Some(ns_name) = response.get_unresolved_ns(&frame.qname) {
+            let ns_name = ns_name.to_owned();
+            frame.state = FrameState::Suspended(response);
+            stack.push(Frame {
+                qname: ns_name,
+                qtype: QueryType::A,
+                state: FrameState::Active(resolver.recursive_ns_seed),
+            });
+            continue;
+        }
 
-            // Here we go down the rabbit hole by starting _another_ lookup sequence in the
-            // midst of our current one. Hopefully, this will give us the IP of an appropriate
-            // name server.
-            let recursive_response = recursive_lookup(&new_ns_name, QueryType::A, resolver).await?;
-
-            // Finally, we pick a random ip from the result, and restart the loop. If no such
-            // record is available, we again return the last result we got.
-            if let Some(new_ns) = recursive_response.get_random_a() {
-                ns = new_ns;
-            } else {
-                return Ok(response);
+        // No more leads — treat as terminal.
+        stack.pop();
+        let mut result = response;
+        while let Some(parent) = stack.last_mut() {
+            match &parent.state {
+                FrameState::Suspended(_) => {
+                    if let Some(ip) = result.get_random_a() {
+                        parent.state = FrameState::Active(ip);
+                        break;
+                    }
+                    let FrameState::Suspended(fallback) =
+                        std::mem::replace(&mut parent.state, FrameState::Active(resolver.recursive_ns_seed))
+                    else {
+                        unreachable!()
+                    };
+                    result = fallback;
+                    stack.pop();
+                }
+                FrameState::Active(_) => unreachable!("active frame below suspended"),
             }
         }
-    })
+        if stack.is_empty() {
+            return Ok(result);
+        }
+    }
 }
 
 // point of contact for handling the query packets initally
