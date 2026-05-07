@@ -1,4 +1,5 @@
 use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +15,9 @@ use crate::{
     question::DnsQuestion,
 };
 
+// Wraps around at u16::MAX; uniqueness is best-effort for in-flight queries.
+static QUERY_ID: AtomicU16 = AtomicU16::new(1);
+
 // Circuit breaker type produced by Config::new().build().
 // Default policy: SuccessRateOverTimeWindow OR ConsecutiveFailures, both with EqualJittered backoff.
 type DnsCircuitBreaker = failsafe::StateMachine<
@@ -26,27 +30,42 @@ type DnsCircuitBreaker = failsafe::StateMachine<
 
 pub struct UpstreamNameServer {
     pub resolvers: Vec<std::net::SocketAddr>,
+    pub recursive_ns_seed: Ipv4Addr,
+    pub upstream_dns_port: u16,
     timeout: Duration,
     // Shared across clones so all query tasks see the same breaker state.
     circuit_breaker: Arc<DnsCircuitBreaker>,
 }
 
 impl UpstreamNameServer {
-    pub fn new(resolvers: Vec<std::net::SocketAddr>, timeout: Duration) -> Self {
+    pub fn new(
+        resolvers: Vec<std::net::SocketAddr>,
+        timeout: Duration,
+        recursive_ns_seed: Ipv4Addr,
+        upstream_dns_port: u16,
+    ) -> Self {
         UpstreamNameServer {
             resolvers,
             timeout,
+            recursive_ns_seed,
+            upstream_dns_port,
             circuit_breaker: Arc::new(failsafe::Config::new().build()),
         }
     }
 
-    pub fn init(lookup_servers: impl AsRef<[std::net::SocketAddr]>, timeout: Duration) -> Self {
+    pub fn init(
+        lookup_servers: impl AsRef<[std::net::SocketAddr]>,
+        timeout: Duration,
+        recursive_ns_seed: Ipv4Addr,
+        upstream_dns_port: u16,
+    ) -> Self {
         let servers = lookup_servers.as_ref();
-        if servers.is_empty() {
-            Self::new(vec![std::net::SocketAddr::from(([8, 8, 8, 8], 53))], timeout)
+        let servers = if servers.is_empty() {
+            vec![std::net::SocketAddr::from(([8, 8, 8, 8], 53))]
         } else {
-            Self::new(servers.to_vec(), timeout)
-        }
+            servers.to_vec()
+        };
+        Self::new(servers, timeout, recursive_ns_seed, upstream_dns_port)
     }
 
     pub async fn resolve(&self, _query: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -118,7 +137,7 @@ async fn raw_lookup(
     );
 
     let mut packet = DnsPacket::new();
-    packet.header.id = 6666;
+    packet.header.id = QUERY_ID.fetch_add(1, Ordering::Relaxed);
     packet.header.questions = 1;
     packet.header.recursion_desired = true;
     packet.questions.push(DnsQuestion::new(qname.to_string(), qtype));

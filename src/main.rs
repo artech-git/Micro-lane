@@ -25,15 +25,6 @@ use tracing::error_span as err;
 
 use crate::util::shutdown_signal;
 
-/*
-    Problems to solve:
-    
-        DONE:
-        1. collecting the config from command line
-        4. logging using tracing crate
-
-*/
-
 #[tokio::main]
 async fn main() -> BackendResult<()> {
     let config_data = match config::Config::try_parse() {
@@ -49,12 +40,18 @@ async fn main() -> BackendResult<()> {
         }
     };
 
-    let layers = util::setup_log_target_layer(config_data.log_path);
-    // Initialize the subscriber with the layers
-    let stdout_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stdout);
+    let file_layers = if config_data.file_logging {
+        std::fs::create_dir_all(&config_data.log_path)?;
+        Some(util::setup_log_target_layer(config_data.log_path))
+    } else {
+        None
+    };
+
+    let stdout_layer = config_data.stdout_logging
+        .then(|| tracing_subscriber::fmt::layer().with_writer(std::io::stdout));
 
     tracing_subscriber::registry()
-        .with(layers)
+        .with(file_layers)
         .with(stdout_layer)
         .init();
 
@@ -65,15 +62,14 @@ async fn main() -> BackendResult<()> {
 
     // Single circuit-breaker-backed resolver shared across all query tasks.
     let resolver = Arc::new(UpstreamNameServer::init(
-        &[
-            std::net::SocketAddr::from(([8, 8, 8, 8], 53)),
-            std::net::SocketAddr::from(([8, 8, 4, 4], 53)),
-        ],
+        &config_data.upstream_servers,
         Duration::from_secs(config_data.upstream_timeout_secs),
+        config_data.recursive_ns_seed,
+        config_data.upstream_dns_port,
     ));
 
     // buffer for receiving data, and transferring to the handler
-    let mut temp_buffer = [0u8; 2048];
+    let mut temp_buffer = vec![0u8; config_data.recv_buffer_size];
 
     // tokio task handler for tracking the tasks spawned for given connections
     let task_handler = tokio_util::task::TaskTracker::new();
