@@ -56,10 +56,11 @@ pub fn setup_log_target_layer(
 
         layers.push(
             tracing_subscriber::fmt::layer()
-                // .with_writer(std::io::stdout)
+                .json()
                 .with_writer(file_writer)
                 .with_file(true)
                 .with_target(true)
+                .with_current_span(true)
                 .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
                     meta.target() == *target
                 })),

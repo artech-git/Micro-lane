@@ -40,8 +40,12 @@ async fn main() -> BackendResult<()> {
         }
     };
 
-    let file_layers = config_data.file_logging
-        .then(|| util::setup_log_target_layer(config_data.log_path));
+    let file_layers = if config_data.file_logging {
+        std::fs::create_dir_all(&config_data.log_path)?;
+        Some(util::setup_log_target_layer(config_data.log_path))
+    } else {
+        None
+    };
 
     let stdout_layer = config_data.stdout_logging
         .then(|| tracing_subscriber::fmt::layer().with_writer(std::io::stdout));
