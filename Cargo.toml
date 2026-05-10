@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.5.53", features = ["derive", "default"] }
+hickory-proto = "0.24"
 failsafe = { version = "1.3.0", features = ["futures-support"] }
 thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = ["full"] }
