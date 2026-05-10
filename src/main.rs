@@ -9,14 +9,9 @@ use tracing_subscriber::util::SubscriberInitExt;
 use error::BackendResult;
 use packet::handle_query;
 
-mod bytes;
 mod config;
 mod error;
-mod header;
 mod packet;
-mod query;
-mod question;
-mod record;
 mod util;
 mod upstream_resolver;
 

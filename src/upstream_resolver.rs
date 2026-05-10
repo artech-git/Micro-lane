@@ -1,4 +1,7 @@
+use hickory_proto::op::{Message, MessageType, OpCode, Query};
+use hickory_proto::rr::{Name, RecordType};
 use std::net::Ipv4Addr;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,13 +10,7 @@ use failsafe::futures::CircuitBreaker as _;
 use tokio::net::UdpSocket;
 use tracing::trace;
 
-use crate::{
-    bytes::BytePacketBuffer,
-    error::BackendResult,
-    packet::DnsPacket,
-    query::QueryType,
-    question::DnsQuestion,
-};
+use crate::error::BackendResult;
 
 // Wraps around at u16::MAX; uniqueness is best-effort for in-flight queries.
 static QUERY_ID: AtomicU16 = AtomicU16::new(1);
@@ -79,12 +76,9 @@ impl UpstreamNameServer {
     pub async fn lookup(
         &self,
         qname: &str,
-        qtype: QueryType,
+        qtype: RecordType,
         server: (Ipv4Addr, u16),
-    ) -> BackendResult<DnsPacket> {
-        // Wrap raw_lookup in a timeout so a silent/slow upstream doesn't stall the task
-        // indefinitely. The timeout resolves to Err, which the circuit breaker counts as a
-        // failure — repeated timeouts will open the breaker.
+    ) -> BackendResult<Message> {
         let timeout = self.timeout;
         let timed = async move {
             match tokio::time::timeout(timeout, raw_lookup(qname, qtype, server)).await {
@@ -100,7 +94,8 @@ impl UpstreamNameServer {
                     Err(format!(
                         "upstream lookup timed out after {}s",
                         timeout.as_secs()
-                    ).into())
+                    )
+                    .into())
                 }
             }
         };
@@ -123,9 +118,9 @@ impl UpstreamNameServer {
 
 async fn raw_lookup(
     qname: &str,
-    qtype: QueryType,
+    qtype: RecordType,
     server: (Ipv4Addr, u16),
-) -> BackendResult<DnsPacket> {
+) -> BackendResult<Message> {
     let socket = UdpSocket::bind(("0.0.0.0", 0)).await?;
 
     trace!(
@@ -136,18 +131,25 @@ async fn raw_lookup(
         server.0
     );
 
-    let mut packet = DnsPacket::new();
-    packet.header.id = QUERY_ID.fetch_add(1, Ordering::Relaxed);
-    packet.header.questions = 1;
-    packet.header.recursion_desired = true;
-    packet.questions.push(DnsQuestion::new(qname.to_string(), qtype));
+    let name = Name::from_str(qname)?;
 
-    let mut req_buffer = BytePacketBuffer::new();
-    packet.write(&mut req_buffer)?;
-    socket.send_to(&req_buffer.buf[0..req_buffer.pos], server).await?;
+    let mut query = Query::new();
+    query.set_name(name).set_query_type(qtype);
 
-    let mut res_buffer = BytePacketBuffer::new();
-    socket.recv_from(&mut res_buffer.buf).await?;
+    let mut message = Message::new();
+    message
+        .set_id(QUERY_ID.fetch_add(1, Ordering::Relaxed))
+        .set_message_type(MessageType::Query)
+        .set_op_code(OpCode::Query)
+        .set_recursion_desired(true)
+        .add_query(query);
 
-    DnsPacket::from_buffer(&mut res_buffer)
+    let wire = message.to_vec()?;
+    socket.send_to(&wire, server).await?;
+
+    // 4096 bytes to accommodate EDNS0 responses larger than the legacy 512-byte limit.
+    let mut buf = vec![0u8; 4096];
+    let (n, _) = socket.recv_from(&mut buf).await?;
+
+    Ok(Message::from_vec(&buf[..n])?)
 }
