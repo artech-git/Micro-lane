@@ -18,8 +18,6 @@ pub mod log_target_data {
     ];
 }
 
-const UPSTREAM_SERVER: [&str; 2] = ["8.8.8.8", "8.8.4.4"];
-
 // only shutdown on SIGTERM or SIGINT
 pub async fn shutdown_signal() -> Result<Arc<Notify>, Box<dyn std::error::Error>> {
     let notifier = Arc::new(Notify::new());
@@ -58,10 +56,11 @@ pub fn setup_log_target_layer(
 
         layers.push(
             tracing_subscriber::fmt::layer()
-                // .with_writer(std::io::stdout)
+                .json()
                 .with_writer(file_writer)
                 .with_file(true)
                 .with_target(true)
+                .with_current_span(true)
                 .with_filter(tracing_subscriber::filter::filter_fn(move |meta| {
                     meta.target() == *target
                 })),

@@ -1,45 +1,24 @@
 use clap::Parser;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::UdpSocket;
+use upstream_resolver::UpstreamNameServer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use error::BackendResult;
 use packet::handle_query;
 
-mod bytes;
 mod config;
 mod error;
-mod header;
 mod packet;
-mod query;
-mod question;
-mod record;
 mod util;
+mod upstream_resolver;
 
 use tracing::debug_span as debug;
 use tracing::error_span as err;
 
 use crate::util::shutdown_signal;
-
-/*
-    Problems to solve:
-
-        2. handling signal_c for graceful shutdown
-
-
-        3. upstream stream lookup from another dns server
-            (FIXED) 3.1 random port binding for upstream queries
-            3.2 Solution NO.2 -> using single socket for handling the upstream queries in Rows
-
-        DONE:
-        1. collecting the config from command line
-        4. logging using tracing crate
-
-
-        TODO:
-        // use single upstream port for upstream queries and not ephemeral ports
-*/
 
 #[tokio::main]
 async fn main() -> BackendResult<()> {
@@ -56,12 +35,18 @@ async fn main() -> BackendResult<()> {
         }
     };
 
-    let layers = util::setup_log_target_layer(config_data.log_path);
-    // Initialize the subscriber with the layers
-    let stdout_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stdout);
+    let file_layers = if config_data.file_logging {
+        std::fs::create_dir_all(&config_data.log_path)?;
+        Some(util::setup_log_target_layer(config_data.log_path))
+    } else {
+        None
+    };
+
+    let stdout_layer = config_data.stdout_logging
+        .then(|| tracing_subscriber::fmt::layer().with_writer(std::io::stdout));
 
     tracing_subscriber::registry()
-        .with(layers)
+        .with(file_layers)
         .with(stdout_layer)
         .init();
 
@@ -70,8 +55,16 @@ async fn main() -> BackendResult<()> {
     let inner_socket = UdpSocket::bind((config_data.bind_ip, config_data.port)).await?;
     let shared_socket = Arc::new(inner_socket);
 
+    // Single circuit-breaker-backed resolver shared across all query tasks.
+    let resolver = Arc::new(UpstreamNameServer::init(
+        &config_data.upstream_servers,
+        Duration::from_secs(config_data.upstream_timeout_secs),
+        config_data.recursive_ns_seed,
+        config_data.upstream_dns_port,
+    ));
+
     // buffer for receiving data, and transferring to the handler
-    let mut temp_buffer = [0u8; 2048];
+    let mut temp_buffer = vec![0u8; config_data.recv_buffer_size];
 
     // tokio task handler for tracking the tasks spawned for given connections
     let task_handler = tokio_util::task::TaskTracker::new();
@@ -100,10 +93,11 @@ async fn main() -> BackendResult<()> {
 
                 let data = temp_buffer[..len].to_vec();
                 let shared_socket_internal = shared_socket.clone();
+                let resolver_clone = Arc::clone(&resolver);
 
                 task_handler.spawn(async move {
 
-                    match handle_query(&shared_socket_internal, addr, data).await {
+                    match handle_query(&shared_socket_internal, addr, data, resolver_clone).await {
                         Ok(_) => {
                             debug!("connection_debug", "Query handled successfully for {addr}");
                         }
@@ -117,7 +111,9 @@ async fn main() -> BackendResult<()> {
         }
     }
 
-    // finish the existing tokio task handles
+    // close() signals the tracker that no new tasks will be spawned, which is
+    // required for wait() to ever resolve — without it wait() blocks forever.
+    task_handler.close();
     task_handler.wait().await;
 
     Ok(())
