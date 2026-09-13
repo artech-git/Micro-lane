@@ -44,6 +44,14 @@ pub struct Config {
     /// Timeout in seconds for upstream DNS lookups
     #[clap(long, default_value = "5")]
     pub upstream_timeout_secs: u64,
+
+    /// Port for the HTTP metrics/health server
+    #[clap(long, default_value = "9090")]
+    pub metrics_port: u16,
+
+    /// Enable the HTTP metrics/health server
+    #[clap(long, default_value = "true", action = clap::ArgAction::Set)]
+    pub metrics_enabled: bool,
 }
 
 fn parse_buffer_size(s: &str) -> Result<usize, String> {

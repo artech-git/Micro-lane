@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::net::UdpSocket as TokioUdpSocket;
 
 use crate::error::BackendResult;
+use crate::metrics::Metrics;
 use crate::upstream_resolver::UpstreamNameServer;
 
 fn get_random_a(msg: &Message) -> Option<Ipv4Addr> {
@@ -179,8 +180,11 @@ pub async fn handle_query(
     addr: SocketAddr,
     data: Vec<u8>,
     resolver: Arc<UpstreamNameServer>,
+    metrics: Arc<Metrics>,
 ) -> BackendResult<()> {
     let request = Message::from_vec(&data)?;
+
+    metrics.record_query();
 
     let mut response = Message::new();
     response
@@ -201,6 +205,7 @@ pub async fn handle_query(
         if let Ok(result) = recursive_lookup(&qname, qtype, &resolver).await {
             response.add_query(query);
             response.set_response_code(result.response_code());
+            metrics.record_query_ok();
 
             for rec in result.answers() {
                 tracing::info!("Answer: {:?}", rec);
@@ -216,9 +221,11 @@ pub async fn handle_query(
             }
         } else {
             response.set_response_code(ResponseCode::ServFail);
+            metrics.record_query_servfail();
         }
     } else {
         response.set_response_code(ResponseCode::FormErr);
+        metrics.record_query_formerr();
     }
 
     tracing::debug!("Sending response: {:?}", response);

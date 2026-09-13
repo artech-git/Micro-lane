@@ -11,6 +11,7 @@ use tokio::net::UdpSocket;
 use tracing::trace;
 
 use crate::error::BackendResult;
+use crate::metrics::Metrics;
 
 // Wraps around at u16::MAX; uniqueness is best-effort for in-flight queries.
 static QUERY_ID: AtomicU16 = AtomicU16::new(1);
@@ -32,6 +33,7 @@ pub struct UpstreamNameServer {
     timeout: Duration,
     // Shared across clones so all query tasks see the same breaker state.
     circuit_breaker: Arc<DnsCircuitBreaker>,
+    pub metrics: Arc<Metrics>,
 }
 
 impl UpstreamNameServer {
@@ -40,6 +42,7 @@ impl UpstreamNameServer {
         timeout: Duration,
         recursive_ns_seed: Ipv4Addr,
         upstream_dns_port: u16,
+        metrics: Arc<Metrics>,
     ) -> Self {
         UpstreamNameServer {
             resolvers,
@@ -47,6 +50,7 @@ impl UpstreamNameServer {
             recursive_ns_seed,
             upstream_dns_port,
             circuit_breaker: Arc::new(failsafe::Config::new().build()),
+            metrics,
         }
     }
 
@@ -55,6 +59,7 @@ impl UpstreamNameServer {
         timeout: Duration,
         recursive_ns_seed: Ipv4Addr,
         upstream_dns_port: u16,
+        metrics: Arc<Metrics>,
     ) -> Self {
         let servers = lookup_servers.as_ref();
         let servers = if servers.is_empty() {
@@ -62,7 +67,7 @@ impl UpstreamNameServer {
         } else {
             servers.to_vec()
         };
-        Self::new(servers, timeout, recursive_ns_seed, upstream_dns_port)
+        Self::new(servers, timeout, recursive_ns_seed, upstream_dns_port, metrics)
     }
 
     pub async fn resolve(&self, _query: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -80,10 +85,12 @@ impl UpstreamNameServer {
         server: (Ipv4Addr, u16),
     ) -> BackendResult<Message> {
         let timeout = self.timeout;
+        let metrics_ref = Arc::clone(&self.metrics);
         let timed = async move {
             match tokio::time::timeout(timeout, raw_lookup(qname, qtype, server)).await {
                 Ok(result) => result,
                 Err(_elapsed) => {
+                    metrics_ref.record_upstream_timeout();
                     tracing::warn!(
                         target: "connection_err",
                         "Upstream lookup timed out after {}s: {} via {}",
@@ -101,9 +108,14 @@ impl UpstreamNameServer {
         };
 
         match self.circuit_breaker.call(timed).await {
-            Ok(packet) => Ok(packet),
+            Ok(packet) => {
+                self.metrics.set_circuit_open(false);
+                Ok(packet)
+            }
             Err(failsafe::Error::Inner(e)) => Err(e),
             Err(failsafe::Error::Rejected) => {
+                self.metrics.record_circuit_breaker_rejection();
+                self.metrics.set_circuit_open(true);
                 tracing::warn!(
                     target: "connection_err",
                     "Circuit breaker OPEN — fast-failing lookup for {} via {}",
