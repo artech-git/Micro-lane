@@ -11,6 +11,8 @@ use packet::handle_query;
 
 mod config;
 mod error;
+mod http;
+mod metrics;
 mod packet;
 mod util;
 mod upstream_resolver;
@@ -18,6 +20,8 @@ mod upstream_resolver;
 use tracing::debug_span as debug;
 use tracing::error_span as err;
 
+use crate::http::serve_metrics;
+use crate::metrics::Metrics;
 use crate::util::shutdown_signal;
 
 #[tokio::main]
@@ -55,12 +59,15 @@ async fn main() -> BackendResult<()> {
     let inner_socket = UdpSocket::bind((config_data.bind_ip, config_data.port)).await?;
     let shared_socket = Arc::new(inner_socket);
 
+    let metrics = Arc::new(Metrics::new());
+
     // Single circuit-breaker-backed resolver shared across all query tasks.
     let resolver = Arc::new(UpstreamNameServer::init(
         &config_data.upstream_servers,
         Duration::from_secs(config_data.upstream_timeout_secs),
         config_data.recursive_ns_seed,
         config_data.upstream_dns_port,
+        Arc::clone(&metrics),
     ));
 
     // buffer for receiving data, and transferring to the handler
@@ -70,6 +77,15 @@ async fn main() -> BackendResult<()> {
     let task_handler = tokio_util::task::TaskTracker::new();
 
     let shutdown_handle = shutdown_signal().await?;
+
+    if config_data.metrics_enabled {
+        tokio::spawn(serve_metrics(
+            Arc::clone(&metrics),
+            config_data.metrics_port,
+            Arc::clone(&shutdown_handle),
+        ));
+    }
+
     let notified_owned = shutdown_handle.notified();
     tokio::pin!(notified_owned);
 
@@ -94,10 +110,11 @@ async fn main() -> BackendResult<()> {
                 let data = temp_buffer[..len].to_vec();
                 let shared_socket_internal = shared_socket.clone();
                 let resolver_clone = Arc::clone(&resolver);
+                let metrics_clone = Arc::clone(&metrics);
 
                 task_handler.spawn(async move {
 
-                    match handle_query(&shared_socket_internal, addr, data, resolver_clone).await {
+                    match handle_query(&shared_socket_internal, addr, data, resolver_clone, metrics_clone).await {
                         Ok(_) => {
                             debug!("connection_debug", "Query handled successfully for {addr}");
                         }
