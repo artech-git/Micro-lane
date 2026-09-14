@@ -29,9 +29,16 @@ struct UpstreamStats {
 }
 
 #[derive(Serialize)]
+struct DownstreamStats {
+    rate_limited: u64,
+    circuit_rejections: u64,
+}
+
+#[derive(Serialize)]
 struct MetricsResponse {
     queries: QueryStats,
     upstream: UpstreamStats,
+    downstream: DownstreamStats,
     uptime_secs: u64,
 }
 
@@ -73,6 +80,10 @@ async fn metrics_handler(State(metrics): State<Arc<Metrics>>) -> Json<MetricsRes
         upstream: UpstreamStats {
             timeouts: metrics.upstream_timeouts(),
             circuit_breaker_rejections: metrics.circuit_breaker_rejections(),
+        },
+        downstream: DownstreamStats {
+            rate_limited: metrics.client_rate_limited(),
+            circuit_rejections: metrics.client_circuit_rejections(),
         },
         uptime_secs: metrics.uptime_secs(),
     })

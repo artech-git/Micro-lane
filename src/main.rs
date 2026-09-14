@@ -9,6 +9,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use error::BackendResult;
 use packet::handle_query;
 
+mod client_guard;
 mod config;
 mod error;
 mod http;
@@ -16,6 +17,9 @@ mod metrics;
 mod packet;
 mod util;
 mod upstream_resolver;
+
+use client_guard::{ClientGuard, RateDecision};
+use failsafe::futures::CircuitBreaker as _;
 
 use tracing::debug_span as debug;
 use tracing::error_span as err;
@@ -70,6 +74,16 @@ async fn main() -> BackendResult<()> {
         Arc::clone(&metrics),
     ));
 
+    // Per-client rate limiter + circuit breaker for downstream queries. `None` when disabled,
+    // so the receive loop and query tasks skip the checks entirely.
+    let client_guard = config_data.client_protection_enabled.then(|| {
+        Arc::new(ClientGuard::new(
+            config_data.client_rate_capacity,
+            config_data.client_rate_refill_per_sec,
+            Duration::from_secs(config_data.client_idle_ttl_secs),
+        ))
+    });
+
     // buffer for receiving data, and transferring to the handler
     let mut temp_buffer = vec![0u8; config_data.recv_buffer_size];
 
@@ -84,6 +98,26 @@ async fn main() -> BackendResult<()> {
             config_data.metrics_port,
             Arc::clone(&shutdown_handle),
         ));
+    }
+
+    if let Some(guard) = client_guard.clone() {
+        let sweep_shutdown = Arc::clone(&shutdown_handle);
+        let sweep_interval = Duration::from_secs(config_data.client_sweep_interval_secs);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(sweep_interval);
+            let notified = sweep_shutdown.notified();
+            tokio::pin!(notified);
+            'guard_logic: loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        guard.sweep();
+                    }
+                    _ = &mut notified => {
+                        break 'guard_logic;
+                    }
+                }
+            }
+        });
     }
 
     let notified_owned = shutdown_handle.notified();
@@ -107,21 +141,47 @@ async fn main() -> BackendResult<()> {
                     Ok((l, a)) => (l, a),
                 };
 
+                let client_entry = if let Some(guard) = &client_guard {
+                    match guard.check_rate(addr.ip()) {
+                        RateDecision::Allowed(entry) => Some(entry),
+                        RateDecision::RateLimited => {
+                            metrics.record_client_rate_limited();
+                            tracing::warn!(target: "connection_err", "Rate limit exceeded for {addr}, dropping query");
+                            continue 'connection;
+                        }
+                    }
+                } else {
+                    None
+                };
+
                 let data = temp_buffer[..len].to_vec();
                 let shared_socket_internal = shared_socket.clone();
                 let resolver_clone = Arc::clone(&resolver);
                 let metrics_clone = Arc::clone(&metrics);
+                let metrics_for_breaker = Arc::clone(&metrics);
 
                 task_handler.spawn(async move {
 
-                    match handle_query(&shared_socket_internal, addr, data, resolver_clone, metrics_clone).await {
+                    let query_future = handle_query(&shared_socket_internal, addr, data, resolver_clone, metrics_clone);
+
+                    let result = if let Some(entry) = &client_entry {
+                        entry.breaker.call(query_future).await
+                    } else {
+                        query_future.await.map_err(failsafe::Error::Inner)
+                    };
+
+                    match result {
                         Ok(_) => {
                             debug!("connection_debug", "Query handled successfully for {addr}");
                         }
-                        Err(e) => {
+                        Err(failsafe::Error::Inner(e)) => {
                             let err_msg = format!("An error occurred: {:?}", e);
                             err!("connection_err", err_msg);
-                        },
+                        }
+                        Err(failsafe::Error::Rejected) => {
+                            metrics_for_breaker.record_client_circuit_rejection();
+                            tracing::warn!(target: "connection_err", "Circuit breaker OPEN for client {addr} — dropping query");
+                        }
                     }
                 });
             }
