@@ -31,3 +31,58 @@ impl TokenBucket {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    #[test]
+    fn allows_bursts_up_to_capacity_then_blocks() {
+        let mut bucket = TokenBucket::new(3.0, 1.0);
+
+        assert!(bucket.try_consume());
+        assert!(bucket.try_consume());
+        assert!(bucket.try_consume());
+        assert!(
+            !bucket.try_consume(),
+            "a fourth immediate call must be blocked once capacity is exhausted"
+        );
+    }
+
+    #[test]
+    fn refills_over_time() {
+        // 20 tokens/sec => roughly one token every 50ms.
+        let mut bucket = TokenBucket::new(1.0, 20.0);
+
+        assert!(bucket.try_consume());
+        assert!(!bucket.try_consume());
+
+        sleep(Duration::from_millis(80));
+
+        assert!(
+            bucket.try_consume(),
+            "bucket should have refilled at least one token after waiting past the refill interval"
+        );
+    }
+
+    #[test]
+    fn refill_never_exceeds_capacity() {
+        let mut bucket = TokenBucket::new(2.0, 1000.0);
+
+        assert!(bucket.try_consume());
+        assert!(bucket.try_consume());
+        assert!(!bucket.try_consume());
+
+        // Plenty of time for the (fast) refill rate to overshoot capacity if uncapped.
+        sleep(Duration::from_millis(50));
+
+        assert!(bucket.try_consume());
+        assert!(bucket.try_consume());
+        assert!(
+            !bucket.try_consume(),
+            "tokens must be capped at capacity, not accumulate without bound while idle"
+        );
+    }
+}
