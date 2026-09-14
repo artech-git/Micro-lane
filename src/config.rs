@@ -52,6 +52,26 @@ pub struct Config {
     /// Enable the HTTP metrics/health server
     #[clap(long, default_value = "true", action = clap::ArgAction::Set)]
     pub metrics_enabled: bool,
+
+    /// Enable per-client rate limiting and circuit breaking for downstream queries
+    #[clap(long, default_value = "true", action = clap::ArgAction::Set)]
+    pub client_protection_enabled: bool,
+
+    /// Per-client token bucket burst capacity (max queries in a burst)
+    #[clap(long, default_value = "100.0")]
+    pub client_rate_capacity: f64,
+
+    /// Per-client sustained query rate, in tokens refilled per second
+    #[clap(long, default_value = "10.0")]
+    pub client_rate_refill_per_sec: f64,
+
+    /// Seconds of inactivity before a client's rate-limit/circuit-breaker state is evicted
+    #[clap(long, default_value = "300")]
+    pub client_idle_ttl_secs: u64,
+
+    /// Interval, in seconds, between sweeps that evict idle client state
+    #[clap(long, default_value = "20")]
+    pub client_sweep_interval_secs: u64,
 }
 
 fn parse_buffer_size(s: &str) -> Result<usize, String> {

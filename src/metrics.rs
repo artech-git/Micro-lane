@@ -9,6 +9,8 @@ pub struct Metrics {
     pub upstream_timeouts: AtomicU64,
     pub circuit_breaker_rejections: AtomicU64,
     pub circuit_open: AtomicBool,
+    pub client_rate_limited: AtomicU64,
+    pub client_circuit_rejections: AtomicU64,
     pub start_time: Instant,
 }
 
@@ -22,6 +24,8 @@ impl Metrics {
             upstream_timeouts: AtomicU64::new(0),
             circuit_breaker_rejections: AtomicU64::new(0),
             circuit_open: AtomicBool::new(false),
+            client_rate_limited: AtomicU64::new(0),
+            client_circuit_rejections: AtomicU64::new(0),
             start_time: Instant::now(),
         }
     }
@@ -98,5 +102,25 @@ impl Metrics {
     #[inline]
     pub fn circuit_breaker_rejections(&self) -> u64 {
         self.circuit_breaker_rejections.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn record_client_rate_limited(&self) {
+        self.client_rate_limited.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn record_client_circuit_rejection(&self) {
+        self.client_circuit_rejections.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn client_rate_limited(&self) -> u64 {
+        self.client_rate_limited.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub fn client_circuit_rejections(&self) -> u64 {
+        self.client_circuit_rejections.load(Ordering::Relaxed)
     }
 }
