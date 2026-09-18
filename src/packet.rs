@@ -2,11 +2,10 @@ use hickory_proto::op::{Message, MessageType, ResponseCode};
 use hickory_proto::rr::{Name, RData, RecordType};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::str::FromStr;
-use std::sync::Arc;
-use tokio::net::UdpSocket as TokioUdpSocket;
 
 use crate::error::BackendResult;
-use crate::metrics::Metrics;
+use crate::metrics::{Counter, Metrics};
+use crate::state::AppState;
 use crate::upstream_resolver::UpstreamNameServer;
 
 fn get_random_a(msg: &Message) -> Option<Ipv4Addr> {
@@ -71,6 +70,7 @@ async fn recursive_lookup(
     qname: &str,
     qtype: RecordType,
     resolver: &UpstreamNameServer,
+    metrics: &Metrics,
 ) -> BackendResult<Message> {
     let mut stack = vec![Frame {
         qname: qname.to_owned(),
@@ -94,7 +94,12 @@ async fn recursive_lookup(
         );
 
         let response = resolver
-            .lookup(&frame.qname, frame.qtype, (ns, resolver.upstream_dns_port))
+            .lookup(
+                &frame.qname,
+                frame.qtype,
+                (ns, resolver.upstream_dns_port),
+                metrics,
+            )
             .await?;
 
         let qname_name = Name::from_str(&frame.qname)?;
@@ -175,16 +180,10 @@ async fn recursive_lookup(
     }
 }
 
-pub async fn handle_query(
-    socket: &TokioUdpSocket,
-    addr: SocketAddr,
-    data: Vec<u8>,
-    resolver: Arc<UpstreamNameServer>,
-    metrics: Arc<Metrics>,
-) -> BackendResult<()> {
+pub async fn handle_query(state: &AppState, addr: SocketAddr, data: Vec<u8>) -> BackendResult<()> {
     let request = Message::from_vec(&data)?;
 
-    metrics.record_query();
+    let metrics = &state.metrics;
 
     let mut response = Message::new();
     response
@@ -202,10 +201,10 @@ pub async fn handle_query(
         let qname = query.name().to_string();
         let qtype = query.query_type();
 
-        if let Ok(result) = recursive_lookup(&qname, qtype, &resolver).await {
+        if let Ok(result) = recursive_lookup(&qname, qtype, &state.resolver, metrics).await {
             response.add_query(query);
             response.set_response_code(result.response_code());
-            metrics.record_query_ok();
+            metrics.incr(Counter::QueriesOk);
 
             for rec in result.answers() {
                 tracing::info!("Answer: {:?}", rec);
@@ -221,17 +220,17 @@ pub async fn handle_query(
             }
         } else {
             response.set_response_code(ResponseCode::ServFail);
-            metrics.record_query_servfail();
+            metrics.incr(Counter::QueriesServfail);
         }
     } else {
         response.set_response_code(ResponseCode::FormErr);
-        metrics.record_query_formerr();
+        metrics.incr(Counter::QueriesFormerr);
     }
 
     tracing::debug!("Sending response: {:?}", response);
 
     let wire = response.to_vec()?;
-    socket.send_to(&wire, addr).await?;
+    state.socket.send_to(&wire, addr).await?;
 
     Ok(())
 }

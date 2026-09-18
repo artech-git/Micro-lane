@@ -50,6 +50,12 @@ The server supports configuration via a YAML file named `config.yml` in the proj
 - Support for various record types (A, AAAA, CNAME, etc.) to meet diverse DNS needs. 
 - Clean and well-documented codebase for easy understanding and contribution. 
 
+**Design notes:**
+
+- [Shared state & metrics](docs/shared-state-and-metrics.md) — why `Arc` sits only at the
+  `tokio::spawn` boundary, why counters are an indexed array, and why `queries_total` is
+  derived rather than stored.
+
 **Contributing:**
 
 We welcome contributions to make `dns-server` even better. 

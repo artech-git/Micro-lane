@@ -15,6 +15,7 @@ mod error;
 mod http;
 mod metrics;
 mod packet;
+mod state;
 mod util;
 mod upstream_resolver;
 
@@ -25,7 +26,8 @@ use tracing::debug_span as debug;
 use tracing::error_span as err;
 
 use crate::http::serve_metrics;
-use crate::metrics::Metrics;
+use crate::metrics::{Counter, Metrics};
+use crate::state::AppState;
 use crate::util::shutdown_signal;
 
 #[tokio::main]
@@ -60,28 +62,33 @@ async fn main() -> BackendResult<()> {
 
     tracing::info!(target: "connection_debug", name = "decode_packet");
 
-    let inner_socket = UdpSocket::bind((config_data.bind_ip, config_data.port)).await?;
-    let shared_socket = Arc::new(inner_socket);
-
-    let metrics = Arc::new(Metrics::new());
+    let socket = UdpSocket::bind((config_data.bind_ip, config_data.port)).await?;
 
     // Single circuit-breaker-backed resolver shared across all query tasks.
-    let resolver = Arc::new(UpstreamNameServer::init(
+    let resolver = UpstreamNameServer::init(
         &config_data.upstream_servers,
         Duration::from_secs(config_data.upstream_timeout_secs),
         config_data.recursive_ns_seed,
         config_data.upstream_dns_port,
-        Arc::clone(&metrics),
-    ));
+    );
 
     // Per-client rate limiter + circuit breaker for downstream queries. `None` when disabled,
     // so the receive loop and query tasks skip the checks entirely.
     let client_guard = config_data.client_protection_enabled.then(|| {
-        Arc::new(ClientGuard::new(
+        ClientGuard::new(
             config_data.client_rate_capacity,
             config_data.client_rate_refill_per_sec,
             Duration::from_secs(config_data.client_idle_ttl_secs),
-        ))
+        )
+    });
+
+    // One refcount for the whole shared surface: the spawn boundary needs `'static`, and
+    // this way each packet pays a single `Arc::clone` rather than one per component.
+    let state = Arc::new(AppState {
+        socket,
+        resolver,
+        metrics: Metrics::new(),
+        client_guard,
     });
 
     // buffer for receiving data, and transferring to the handler
@@ -94,13 +101,14 @@ async fn main() -> BackendResult<()> {
 
     if config_data.metrics_enabled {
         tokio::spawn(serve_metrics(
-            Arc::clone(&metrics),
+            Arc::clone(&state),
             config_data.metrics_port,
             Arc::clone(&shutdown_handle),
         ));
     }
 
-    if let Some(guard) = client_guard.clone() {
+    if state.client_guard.is_some() {
+        let sweep_state = Arc::clone(&state);
         let sweep_shutdown = Arc::clone(&shutdown_handle);
         let sweep_interval = Duration::from_secs(config_data.client_sweep_interval_secs);
         tokio::spawn(async move {
@@ -110,7 +118,9 @@ async fn main() -> BackendResult<()> {
             'guard_logic: loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        guard.sweep();
+                        if let Some(guard) = &sweep_state.client_guard {
+                            guard.sweep();
+                        }
                     }
                     _ = &mut notified => {
                         break 'guard_logic;
@@ -131,7 +141,7 @@ async fn main() -> BackendResult<()> {
                 break 'connection;
             }
 
-            value = shared_socket.recv_from(&mut temp_buffer) => {
+            value = state.socket.recv_from(&mut temp_buffer) => {
 
                 let (len , addr) = match value {
                     Err(e) => {
@@ -141,11 +151,11 @@ async fn main() -> BackendResult<()> {
                     Ok((l, a)) => (l, a),
                 };
 
-                let client_entry = if let Some(guard) = &client_guard {
+                let client_entry = if let Some(guard) = &state.client_guard {
                     match guard.check_rate(addr.ip()) {
                         RateDecision::Allowed(entry) => Some(entry),
                         RateDecision::RateLimited => {
-                            metrics.record_client_rate_limited();
+                            state.metrics.incr(Counter::ClientRateLimited);
                             tracing::warn!(target: "connection_err", "Rate limit exceeded for {addr}, dropping query");
                             continue 'connection;
                         }
@@ -155,14 +165,11 @@ async fn main() -> BackendResult<()> {
                 };
 
                 let data = temp_buffer[..len].to_vec();
-                let shared_socket_internal = shared_socket.clone();
-                let resolver_clone = Arc::clone(&resolver);
-                let metrics_clone = Arc::clone(&metrics);
-                let metrics_for_breaker = Arc::clone(&metrics);
+                let task_state = Arc::clone(&state);
 
                 task_handler.spawn(async move {
 
-                    let query_future = handle_query(&shared_socket_internal, addr, data, resolver_clone, metrics_clone);
+                    let query_future = handle_query(&task_state, addr, data);
 
                     let result = if let Some(entry) = &client_entry {
                         entry.breaker.call(query_future).await
@@ -179,7 +186,7 @@ async fn main() -> BackendResult<()> {
                             err!("connection_err", err_msg);
                         }
                         Err(failsafe::Error::Rejected) => {
-                            metrics_for_breaker.record_client_circuit_rejection();
+                            task_state.metrics.incr(Counter::ClientCircuitRejections);
                             tracing::warn!(target: "connection_err", "Circuit breaker OPEN for client {addr} — dropping query");
                         }
                     }

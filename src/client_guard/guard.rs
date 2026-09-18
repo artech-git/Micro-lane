@@ -30,6 +30,21 @@ impl ClientGuard {
     }
 
     pub fn check_rate(&self, ip: IpAddr) -> RateDecision {
+        // Steady-state path: a shard *read* lock, so clients hashing to the same shard are
+        // not serialised against each other. `ClientEntry` is all interior mutability, so a
+        // shared reference is enough for both `touch` and `try_consume`. The refcount is
+        // only touched when the packet is actually admitted — a rejected flood costs no
+        // `Arc` clone/drop pair at all.
+        if let Some(entry) = self.entries.get(&ip) {
+            entry.touch();
+            return if entry.try_consume() {
+                RateDecision::Allowed(Arc::clone(&entry))
+            } else {
+                RateDecision::RateLimited
+            };
+        }
+
+        // Slow path: first packet seen from this address.
         let entry = self
             .entries
             .entry(ip)
