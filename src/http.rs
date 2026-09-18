@@ -5,7 +5,8 @@ use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 
-use crate::metrics::Metrics;
+use crate::metrics::Counter;
+use crate::state::AppState;
 
 #[derive(Serialize)]
 struct HealthResponse {
@@ -42,11 +43,9 @@ struct MetricsResponse {
     uptime_secs: u64,
 }
 
-async fn health_handler(
-    State(metrics): State<Arc<Metrics>>,
-) -> (StatusCode, Json<HealthResponse>) {
-    let circuit_open = metrics.is_circuit_open();
-    let uptime_secs = metrics.uptime_secs();
+async fn health_handler(State(state): State<Arc<AppState>>) -> (StatusCode, Json<HealthResponse>) {
+    let circuit_open = state.metrics.is_circuit_open();
+    let uptime_secs = state.metrics.uptime_secs();
 
     if circuit_open {
         (
@@ -69,31 +68,33 @@ async fn health_handler(
     }
 }
 
-async fn metrics_handler(State(metrics): State<Arc<Metrics>>) -> Json<MetricsResponse> {
+async fn metrics_handler(State(state): State<Arc<AppState>>) -> Json<MetricsResponse> {
+    let m = &state.metrics;
     Json(MetricsResponse {
         queries: QueryStats {
-            total: metrics.queries_total(),
-            ok: metrics.queries_ok(),
-            servfail: metrics.queries_servfail(),
-            formerr: metrics.queries_formerr(),
+            // Derived from the three outcome counters rather than stored separately.
+            total: m.queries_total(),
+            ok: m.get(Counter::QueriesOk),
+            servfail: m.get(Counter::QueriesServfail),
+            formerr: m.get(Counter::QueriesFormerr),
         },
         upstream: UpstreamStats {
-            timeouts: metrics.upstream_timeouts(),
-            circuit_breaker_rejections: metrics.circuit_breaker_rejections(),
+            timeouts: m.get(Counter::UpstreamTimeouts),
+            circuit_breaker_rejections: m.get(Counter::CircuitBreakerRejections),
         },
         downstream: DownstreamStats {
-            rate_limited: metrics.client_rate_limited(),
-            circuit_rejections: metrics.client_circuit_rejections(),
+            rate_limited: m.get(Counter::ClientRateLimited),
+            circuit_rejections: m.get(Counter::ClientCircuitRejections),
         },
-        uptime_secs: metrics.uptime_secs(),
+        uptime_secs: m.uptime_secs(),
     })
 }
 
-pub async fn serve_metrics(metrics: Arc<Metrics>, port: u16, shutdown: Arc<Notify>) {
+pub async fn serve_metrics(state: Arc<AppState>, port: u16, shutdown: Arc<Notify>) {
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
-        .with_state(metrics);
+        .with_state(state);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     let listener = TcpListener::bind(addr)

@@ -1,67 +1,72 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
+/// Identifies one counter in [`Metrics`].
+///
+/// Deliberately absent: a `queries_total` counter. Every query increments exactly one of
+/// the three outcome counters, so the total is their sum — see [`Metrics::queries_total`].
+/// Storing it separately would cost a second atomic RMW per query for information the
+/// other three already carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum Counter {
+    QueriesOk = 0,
+    QueriesServfail,
+    QueriesFormerr,
+    UpstreamTimeouts,
+    CircuitBreakerRejections,
+    ClientRateLimited,
+    ClientCircuitRejections,
+}
+
+// Must match the number of `Counter` variants; `Metrics::new` and the indexing in
+// `incr`/`get` both depend on it.
+const COUNTER_COUNT: usize = 7;
+
 pub struct Metrics {
-    pub queries_total: AtomicU64,
-    pub queries_ok: AtomicU64,
-    pub queries_servfail: AtomicU64,
-    pub queries_formerr: AtomicU64,
-    pub upstream_timeouts: AtomicU64,
-    pub circuit_breaker_rejections: AtomicU64,
-    pub circuit_open: AtomicBool,
-    pub client_rate_limited: AtomicU64,
-    pub client_circuit_rejections: AtomicU64,
-    pub start_time: Instant,
+    counters: [AtomicU64; COUNTER_COUNT],
+    circuit_open: AtomicBool,
+    start_time: Instant,
 }
 
 impl Metrics {
     pub fn new() -> Self {
         Self {
-            queries_total: AtomicU64::new(0),
-            queries_ok: AtomicU64::new(0),
-            queries_servfail: AtomicU64::new(0),
-            queries_formerr: AtomicU64::new(0),
-            upstream_timeouts: AtomicU64::new(0),
-            circuit_breaker_rejections: AtomicU64::new(0),
+            counters: std::array::from_fn(|_| AtomicU64::new(0)),
             circuit_open: AtomicBool::new(false),
-            client_rate_limited: AtomicU64::new(0),
-            client_circuit_rejections: AtomicU64::new(0),
             start_time: Instant::now(),
         }
     }
+
+    /// Call sites pass a literal variant, so the index constant-folds and the bounds
+    /// check disappears after inlining.
     #[inline]
-    pub fn record_query(&self) {
-        self.queries_total.fetch_add(1, Ordering::Relaxed);
+    pub fn incr(&self, counter: Counter) {
+        self.counters[counter as usize].fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline]
-    pub fn record_query_ok(&self) {
-        self.queries_ok.fetch_add(1, Ordering::Relaxed);
+    pub fn get(&self, counter: Counter) -> u64 {
+        self.counters[counter as usize].load(Ordering::Relaxed)
     }
 
+    /// Derived rather than stored. The three loads are not a consistent snapshot, but
+    /// these are monotonic counters and metrics consumers already tolerate that skew.
     #[inline]
-    pub fn record_query_servfail(&self) {
-        self.queries_servfail.fetch_add(1, Ordering::Relaxed);
+    pub fn queries_total(&self) -> u64 {
+        self.get(Counter::QueriesOk)
+            + self.get(Counter::QueriesServfail)
+            + self.get(Counter::QueriesFormerr)
     }
 
-    #[inline]
-    pub fn record_query_formerr(&self) {
-        self.queries_formerr.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub fn record_upstream_timeout(&self) {
-        self.upstream_timeouts.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub fn record_circuit_breaker_rejection(&self) {
-        self.circuit_breaker_rejections.fetch_add(1, Ordering::Relaxed);
-    }
-
+    /// Stores only on an actual transition. `lookup` reports "closed" after every
+    /// successful upstream response, and a blind store would invalidate this cache line
+    /// in every other core each time; the load is a cheap shared read.
     #[inline]
     pub fn set_circuit_open(&self, open: bool) {
-        self.circuit_open.store(open, Ordering::Relaxed);
+        if self.circuit_open.load(Ordering::Relaxed) != open {
+            self.circuit_open.store(open, Ordering::Relaxed);
+        }
     }
 
     #[inline]
@@ -73,54 +78,75 @@ impl Metrics {
     pub fn uptime_secs(&self) -> u64 {
         self.start_time.elapsed().as_secs()
     }
+}
 
-    #[inline]
-    pub fn queries_total(&self) -> u64 {
-        self.queries_total.load(Ordering::Relaxed)
+impl Default for Metrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counters_start_at_zero_and_count_independently() {
+        let m = Metrics::new();
+
+        assert_eq!(m.get(Counter::QueriesOk), 0);
+
+        m.incr(Counter::QueriesOk);
+        m.incr(Counter::QueriesOk);
+        m.incr(Counter::UpstreamTimeouts);
+
+        assert_eq!(m.get(Counter::QueriesOk), 2);
+        assert_eq!(m.get(Counter::UpstreamTimeouts), 1);
+        assert_eq!(
+            m.get(Counter::QueriesServfail),
+            0,
+            "counters must not alias each other"
+        );
     }
 
-    #[inline]
-    pub fn queries_ok(&self) -> u64 {
-        self.queries_ok.load(Ordering::Relaxed)
+    #[test]
+    fn queries_total_is_the_sum_of_the_three_outcomes() {
+        let m = Metrics::new();
+
+        m.incr(Counter::QueriesOk);
+        m.incr(Counter::QueriesOk);
+        m.incr(Counter::QueriesServfail);
+        m.incr(Counter::QueriesFormerr);
+
+        assert_eq!(m.queries_total(), 4);
     }
 
-    #[inline]
-    pub fn queries_servfail(&self) -> u64 {
-        self.queries_servfail.load(Ordering::Relaxed)
+    #[test]
+    fn non_outcome_counters_do_not_contribute_to_queries_total() {
+        let m = Metrics::new();
+
+        // A rate-limited or breaker-rejected packet never reaches an outcome, so it must
+        // not inflate the derived total.
+        m.incr(Counter::ClientRateLimited);
+        m.incr(Counter::CircuitBreakerRejections);
+        m.incr(Counter::UpstreamTimeouts);
+
+        assert_eq!(m.queries_total(), 0);
     }
 
-    #[inline]
-    pub fn queries_formerr(&self) -> u64 {
-        self.queries_formerr.load(Ordering::Relaxed)
-    }
+    #[test]
+    fn circuit_flag_round_trips_and_is_idempotent() {
+        let m = Metrics::new();
+        assert!(!m.is_circuit_open());
 
-    #[inline]
-    pub fn upstream_timeouts(&self) -> u64 {
-        self.upstream_timeouts.load(Ordering::Relaxed)
-    }
+        m.set_circuit_open(true);
+        assert!(m.is_circuit_open());
 
-    #[inline]
-    pub fn circuit_breaker_rejections(&self) -> u64 {
-        self.circuit_breaker_rejections.load(Ordering::Relaxed)
-    }
+        // Repeated same-value writes are skipped internally but must not change the value.
+        m.set_circuit_open(true);
+        assert!(m.is_circuit_open());
 
-    #[inline]
-    pub fn record_client_rate_limited(&self) {
-        self.client_rate_limited.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub fn record_client_circuit_rejection(&self) {
-        self.client_circuit_rejections.fetch_add(1, Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub fn client_rate_limited(&self) -> u64 {
-        self.client_rate_limited.load(Ordering::Relaxed)
-    }
-
-    #[inline]
-    pub fn client_circuit_rejections(&self) -> u64 {
-        self.client_circuit_rejections.load(Ordering::Relaxed)
+        m.set_circuit_open(false);
+        assert!(!m.is_circuit_open());
     }
 }
